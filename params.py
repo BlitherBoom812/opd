@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from typing import Optional
-
 from transformers import TrainingArguments as HfTrainingArguments
 
 
@@ -59,6 +58,9 @@ class TrainingArguments(HfTrainingArguments):
 
 @dataclass
 class DataArguments:
+    dataset_name: str = field(
+        default=None, metadata={"help": "dataset_name of training data."}
+    )
     data_path: str = field(
         default=None, metadata={"help": "Path to the training data."}
     )

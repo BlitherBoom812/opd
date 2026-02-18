@@ -5,10 +5,11 @@ from torch.utils.data import Dataset
 class OpenThoughtsDataset(Dataset):
     """dataset for mathematical reasoning."""
 
-    def __init__(self, data_path="open-thoughts/OpenThoughts3-1.2M", split="train", tokenizer=None, max_length=512):
+    def __init__(self, data_path=None, split="train", tokenizer=None, max_length=512):
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.data = load_dataset("open-thoughts/OpenThoughts3-1.2M", "main", split=split)
+        data_path = data_path or "open-thoughts/OpenThoughts3-1.2M"
+        self.data = load_dataset(data_path, "main", split=split)
 
     def __len__(self):
         return len(self.data)
@@ -55,9 +56,10 @@ class OpenThoughtsDataset(Dataset):
 class GSM8KDataset(Dataset):
     """GSM8K dataset for mathematical reasoning."""
 
-    def __init__(self, data_path="./data/gsm8k", split="train", tokenizer=None, max_length=512):
+    def __init__(self, data_path=None, split="train", tokenizer=None, max_length=512):
         self.tokenizer = tokenizer
         self.max_length = max_length
+        data_path = data_path or "./data/gsm8k"
         self.data = load_dataset(data_path, "main", split=split)
 
     def __len__(self):
@@ -101,9 +103,9 @@ class GSM8KDataset(Dataset):
             return float(match.group(1).replace(',', ''))
         return None
 
-def get_dataset(dataset_name, *args, **kwargs):
+def get_dataset(dataset_name, *args, **kwargs) -> Dataset:
     if dataset_name == 'gsm8k':
         return GSM8KDataset(*args, **kwargs)
     elif dataset_name == 'openthoughts':
         return OpenThoughtsDataset(*args, **kwargs)
-    return ValueError(f"Unsupported dataset {dataset_name}")
+    raise ValueError(f"Unsupported dataset {dataset_name}")

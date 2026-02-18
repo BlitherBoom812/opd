@@ -1,1 +1,1 @@
-python run_opd.py --student_model_path $STUDENT_PATH --teacher_model_path $TEACHER_PATH --data_path $DATA_PATH
+python run_opd.py --student_model_path $STUDENT_PATH --teacher_model_path $TEACHER_PATH --dataset_name $DATA_PATH
