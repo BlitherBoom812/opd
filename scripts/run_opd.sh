@@ -1,0 +1,1 @@
+python run_opd.py --student_model_path $STUDENT_PATH --teacher_model_path $TEACHER_PATH --data_path $DATA_PATH
