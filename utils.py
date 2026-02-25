@@ -47,7 +47,7 @@ def compute_full_logprobs_from_model(model, input_ids, attention_mask):
     return logprobs
 
 def generate_completions(model, tokenizer, input_ids, attention_mask,
-                        max_new_tokens=256, temperature=1.0, num_samples=4):
+                        max_new_tokens=256, temperature=1.0, num_samples=4, *args, **kwargs):
     """
     Generate multiple completions for each prompt.
 
@@ -79,6 +79,7 @@ def generate_completions(model, tokenizer, input_ids, attention_mask,
             temperature=temperature,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            *args, **kwargs
         )
 
     # Decode completions
