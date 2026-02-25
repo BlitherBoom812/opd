@@ -27,6 +27,25 @@ def compute_logprobs_from_model(model, input_ids, attention_mask):
 
     return logprobs
 
+def compute_full_logprobs_from_model(model, input_ids, attention_mask):
+    """
+    Compute log probabilities distribution for given sequences.
+
+    Args:
+        model: The language model
+        input_ids: Input token ids, shape (batch_size, seq_len)
+        attention_mask: Attention mask, shape (batch_size, seq_len)
+
+    Returns:
+        logprobs: Log probabilities distribution, shape (batch_size, seq_len, vocab_size)
+    """
+
+    outputs = model(input_ids, attention_mask=attention_mask)
+    
+    logprobs = outputs.logits.log_softmax(dim=-1)
+
+    return logprobs
+
 def generate_completions(model, tokenizer, input_ids, attention_mask,
                         max_new_tokens=256, temperature=1.0, num_samples=4):
     """

@@ -14,6 +14,7 @@ from params import DataArguments, ModelArguments, TrainingArguments
 from data import OpenThoughtsDataset, get_dataset
 from utils import generate_completions, compute_logprobs_from_model
 
+torch.manual_seed(42)
 # ============================================================================
 # Part 2: Reward Function
 # ============================================================================
@@ -64,9 +65,9 @@ def compute_reward(completions, ground_truth_answers):
 # Part 3: OPD Algorithm Implementation
 # ============================================================================
 
-def compute_advantages_opd(student_logprobs, teacher_logprobs):
+def compute_advantages_opd(student_logprobs: torch.Tensor, ref_logprobs: torch.Tensor, teacher_logprobs: torch.Tensor):
     """
-    Compute advantages using OPD (Group Relative Policy Optimization).
+    Compute advantages using OPD
 
     In OPD, for each group of responses to the same prompt:
     - Advantage = reward - mean(group_rewards)
@@ -83,7 +84,8 @@ def compute_advantages_opd(student_logprobs, teacher_logprobs):
     # ========================================================================
     # TODO 2: Implement OPD advantage computation
     # ========================================================================
-    advantages = - (student_logprobs - teacher_logprobs)
+    reverse_kl = (student_logprobs - teacher_logprobs) + (student_logprobs - ref_logprobs)
+    advantages = -reverse_kl
     # END TODO 2
     # ========================================================================
 
@@ -125,6 +127,7 @@ def compute_policy_loss(logprobs, old_logprobs, advantages, loss_mask, clip_eps=
 def train_opd(
     student_model,
     student_tokenizer: AutoTokenizer,
+    ref_model,
     teacher_model,
     teacher_tokenizer,
     accelerator: Accelerator,
@@ -167,7 +170,7 @@ def train_opd(
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             answers = batch["answer"]
-
+            print_main_process(f"prompt: {batch['prompt'][0]}")
             # ====================================================================
             # TODO 5: Implement the OPD training step
             # ====================================================================
@@ -176,21 +179,30 @@ def train_opd(
             seq_ids, seq_mask = gen_data["output_ids"], (gen_data["output_ids"] != student_tokenizer.pad_token_id).long()
             seq_ids = seq_ids.to(device)
 
-            print_main_process(f"generated data sample: {seq_ids.shape}, {gen_data['completions'][0]}")
+            print_main_process(f"generated data sample: {seq_ids.shape}\n{seq_ids[0, :]}\n{gen_data['completions'][0]}")
             student_logprobs = compute_logprobs_from_model(student_model, seq_ids, seq_mask)
-            
+            print_main_process(f"student logprobs: {student_logprobs.shape}, {student_logprobs}")
             with torch.no_grad():
+                ref_logprobs = compute_logprobs_from_model(ref_model, seq_ids, seq_mask)
                 teacher_logprobs = compute_logprobs_from_model(teacher_model, seq_ids, seq_mask)
+                print_main_process(f"teacher logprobs: {teacher_logprobs.shape}, {teacher_logprobs}")
             
-            advantages = compute_advantages_opd(student_logprobs, teacher_logprobs).to(device)
-            loss_mask = seq_mask.clone(); loss_mask[:, :gen_data["prompt_length"]] = 0
+            advantages = compute_advantages_opd(student_logprobs.detach(), ref_logprobs.detach(), teacher_logprobs.detach()).to(device)
+            print_main_process(f"advantages: {advantages.shape}, {advantages}")
+            loss_mask: torch.Tensor = seq_mask.clone(); loss_mask[:, :gen_data["prompt_length"]] = 0
+
             loss = compute_policy_loss(student_logprobs, student_logprobs.detach(), advantages, loss_mask, clip_eps) # weighted by importance sampling (always 1 if update model every step)
+            # loss = policy_loss + kl_loss
+            # print_main_process(f"total loss: {loss}, policy loss: {policy_loss}, kl loss: {kl_loss}")
+            print_main_process(f"loss: {loss}")
+
             optimizer.zero_grad(); accelerator.backward(loss); optimizer.step()
             # END TODO 5
             # ====================================================================
 
             # Logging
             all_losses = accelerator.gather(loss.detach())
+            print_main_process(f"all_losses: {all_losses.shape}, {all_losses}")
             total_loss += all_losses.mean().item()
             num_batches += 1
             
@@ -245,6 +257,9 @@ def main():
     student_model_path = model_args.student_model_path
     teacher_model_path = model_args.teacher_model_path
     student_model, student_tokenizer = load_model_and_tokenizer(student_model_path, device)
+    ref_model, _ = load_model_and_tokenizer(student_model_path, device)
+    ref_model.eval()
+    ref_model.requires_grad_(False)
     print_main_process("Loading teacher tokenizer and model...")
     teacher_model, teacher_tokenizer = load_model_and_tokenizer(teacher_model_path, device)
     teacher_model.eval()
@@ -281,6 +296,7 @@ def main():
     print_main_process("Starting OPD training...")
     rewards_list = train_opd(
         student_model=student_model,
+        ref_model=ref_model,
         student_tokenizer=student_tokenizer,
         teacher_model=teacher_model,
         teacher_tokenizer=teacher_tokenizer,
