@@ -1,3 +1,4 @@
+import functools
 import os
 import sys
 import re
@@ -8,8 +9,22 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser
 from tqdm import tqdm
 import numpy as np
-from accelerate import Accelerator
-
+from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import MixedPrecision, BackwardPrefetch
+from torch.distributed.elastic.multiprocessing.errors import record
+import torch
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    transformer_auto_wrap_policy,
+    # 推荐使用新的 ModuleWrapPolicy (PyTorch 2.1+ 更推荐)
+    ModuleWrapPolicy, 
+)
 from params import DataArguments, ModelArguments, TrainingArguments
 from data import OpenThoughtsDataset, get_dataset
 from utils import generate_completions, compute_logprobs_from_model
@@ -130,10 +145,10 @@ def train_opd(
     ref_model,
     teacher_model,
     teacher_tokenizer,
-    accelerator: Accelerator,
-    train_loader,
-    optimizer,
     device,
+    train_loader: DataLoader,
+    optimizer,
+    local_rank,
     num_epochs=1,
     group_size=4,
     clip_eps=0.2,
@@ -159,11 +174,12 @@ def train_opd(
         print_main_process(f"\n{'='*60}")
         print_main_process(f"Epoch {epoch + 1}/{num_epochs}")
         print_main_process(f"{'='*60}")
+        train_loader.sampler.set_epoch(epoch)
 
         total_loss = 0.0
         num_batches = 0
 
-        progress_bar = tqdm(train_loader, desc=f"Training", disable=not accelerator.is_main_process)
+        progress_bar = tqdm(train_loader, desc=f"Training", disable=local_rank != 0)
 
         for batch_idx, batch in enumerate(progress_bar):
             # Move data to device
@@ -174,8 +190,9 @@ def train_opd(
             # ====================================================================
             # TODO 5: Implement the OPD training step
             # ====================================================================
-            unwrapped_student = accelerator.unwrap_model(student_model)
-            gen_data = generate_completions(unwrapped_student, student_tokenizer, input_ids, attention_mask, max_new_tokens, num_samples=group_size)
+            # For FSDP, we need to properly unwrap the model for generation
+            with FSDP.summon_full_params(student_model, writeback=False):
+                gen_data = generate_completions(student_model, student_tokenizer, input_ids, attention_mask, max_new_tokens, num_samples=group_size, synced_gpus=True)
             seq_ids, seq_mask = gen_data["output_ids"], (gen_data["output_ids"] != student_tokenizer.pad_token_id).long()
             seq_ids = seq_ids.to(device)
 
@@ -196,14 +213,19 @@ def train_opd(
             # print_main_process(f"total loss: {loss}, policy loss: {policy_loss}, kl loss: {kl_loss}")
             print_main_process(f"loss: {loss}")
 
-            optimizer.zero_grad(); accelerator.backward(loss); optimizer.step()
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
             # END TODO 5
             # ====================================================================
 
             # Logging
-            all_losses = accelerator.gather(loss.detach())
-            print_main_process(f"all_losses: {all_losses.shape}, {all_losses}")
-            total_loss += all_losses.mean().item()
+            loss_tensor = loss.detach().clone()
+            # Gather losses from all processes
+            gathered_losses = [torch.zeros_like(loss_tensor) for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather(gathered_losses, loss_tensor)
+            if local_rank == 0:
+                all_losses_tensor = torch.stack(gathered_losses)
+                print_main_process(f"all_losses: {all_losses_tensor.shape}, {all_losses_tensor}")
+                total_loss += all_losses_tensor.mean().item()
             num_batches += 1
             
             progress_bar.set_postfix({
@@ -216,7 +238,7 @@ def train_opd(
     
     return rewards_list
 
-def load_model_and_tokenizer(model_path, device):
+def load_model_and_tokenizer(model_path, device="cpu"):
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -227,51 +249,141 @@ def load_model_and_tokenizer(model_path, device):
         model_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map=device
+        device_map=device  # Load on CPU first, FSDP will handle sharding
     )
     return model, tokenizer
 
 # ============================================================================
 # Part 5: Main Function
 # ============================================================================
+def get_transformer_layer_cls(model):
+    """
+    智能获取模型的Transformer层类（无需手动import）
+    """
+    # 1. 尝试从 Hugging Face 模型属性中获取 (最准确)
+    # 处理 PEFT/LoRA 模型的情况，需访问 base_model
+    target_model = getattr(model, "base_model", model)
+    
+    if hasattr(target_model, "_no_split_modules") and target_model._no_split_modules:
+        no_split_modules = set(target_model._no_split_modules)
+        layer_cls = set()
+        
+        # 遍历模型所有模块，找到名字匹配的 Class
+        for module in target_model.modules():
+            if module.__class__.__name__ in no_split_modules:
+                layer_cls.add(module.__class__)
+        
+        if layer_cls:
+            return layer_cls
+    # 2. 如果没有 _no_split_modules，尝试启发式查找 (Fallback)
+    # 查找常见的层命名习惯，如 'layers', 'h', 'blocks'
+    for attr_name in ["layers", "h", "blocks", "model.layers"]:
+        modules = dict(target_model.named_modules())
+        if attr_name in modules and len(modules[attr_name]) > 0:
+            # 获取第一个Layer的类型
+            return {type(modules[attr_name][0])}
+    return set()
+def setup_fsdp_model(model, local_rank):
+    """
+    Setup FSDP wrapping for the model (Dynamic & Smart)
+    """
+    
+    # 动态获取当前模型的 Transformer Block Class
+    transformer_layer_cls = get_transformer_layer_cls(model)
+    if transformer_layer_cls:
+        # 使用 ModuleWrapPolicy (更现代的写法)
+        # 如果是旧版 PyTorch，可以使用 transformer_auto_wrap_policy + functools.partial
+        auto_wrap_policy = ModuleWrapPolicy(transformer_layer_cls)
+        print_main_process(f"FSDP: Applied Transformer wrapping for {transformer_layer_cls}")
+    else:
+        print_main_process("FSDP: Warning! specific layer class not found. Falling back to size-based wrapping.")
+        auto_wrap_policy = functools.partial(
+            size_based_auto_wrap_policy,
+            min_num_params=10_000_000  # 建议调大一点，1M太小了，通常切分Block至少是10M+
+        )
+    # Mixed precision settings
+    mixed_precision_policy = MixedPrecision(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.bfloat16,
+        buffer_dtype=torch.bfloat16,
+    )
+    # Wrap the model
+    fsdp_model = FSDP(
+        model,
+        auto_wrap_policy=auto_wrap_policy,
+        mixed_precision=mixed_precision_policy,
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+        device_id=local_rank,
+        use_orig_params=True, # 强烈建议开启，兼容 compile 和 PEFT
+        sync_module_states=True
+    )
+    return fsdp_model
 
+@record
 def main():
     global local_rank
+    # Initialize distributed training
+    init_process_group(backend='nccl')
+    local_rank = int(os.environ['LOCAL_RANK'])
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f'cuda:{local_rank}')
+
+    print(f"local rank: {repr(local_rank)}, {type(local_rank)}")
+
     # Configuration
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    
-    accelerator = Accelerator()
-    device = accelerator.device
-    local_rank = accelerator.local_process_index
-    print(f"local rank: {repr(local_rank)}, {type(local_rank)}")
 
     batch_size = 2  # Small batch size for homework
     group_size = 8  # Number of samples per prompt
     num_epochs = 5
     learning_rate = 5e-6
     max_new_tokens = 128
-    
-    print_main_process(f"Training on {accelerator.num_processes} GPUs")
-    print_main_process("Loading student tokenizer and model...")
+
+    world_size = int(os.environ['WORLD_SIZE'])
+    print_main_process(f"Training on {world_size} GPUs")
+
+    cpu_device = "cpu" # load on cpu first, then handled by fsdp
     student_model_path = model_args.student_model_path
     teacher_model_path = model_args.teacher_model_path
-    student_model, student_tokenizer = load_model_and_tokenizer(student_model_path, device)
-    ref_model, _ = load_model_and_tokenizer(student_model_path, device)
-    ref_model.eval()
+    
+    print_main_process("Loading student tokenizer and model...")
+    student_model, student_tokenizer = load_model_and_tokenizer(student_model_path, cpu_device)
+    
+    print_main_process("Loading ref tokenizer and model...")
+    ref_model, _ = load_model_and_tokenizer(student_model_path, cpu_device)
     ref_model.requires_grad_(False)
+    
     print_main_process("Loading teacher tokenizer and model...")
-    teacher_model, teacher_tokenizer = load_model_and_tokenizer(teacher_model_path, device)
-    teacher_model.eval()
+    teacher_model, teacher_tokenizer = load_model_and_tokenizer(teacher_model_path, cpu_device)
     teacher_model.requires_grad_(False)
+
+    print_main_process("Setting up FSDP model and optimizer...")
+    # Wrap model with FSDP
+    student_model = setup_fsdp_model(student_model, local_rank)
+    teacher_model = setup_fsdp_model(teacher_model, local_rank)
+    ref_model = setup_fsdp_model(ref_model, local_rank)
+
+    ref_model.eval()
+    teacher_model.eval()
 
     print_main_process("Loading dataset...")
     train_dataset = get_dataset(data_args.dataset_name, data_path=data_args.data_path, split="train[:100]", tokenizer=student_tokenizer)  # Use small subset
     print_main_process(f"Dataset Loaded, total length: {len(train_dataset)}")
+
+    # Use DistributedSampler for proper data distribution
+    from torch.utils.data.distributed import DistributedSampler
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        shuffle=True,
+    )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        sampler=train_sampler,
         collate_fn=lambda x: {
             "input_ids": torch.nn.utils.rnn.pad_sequence(
                 [item["input_ids"] for item in x],
@@ -288,10 +400,7 @@ def main():
         }
     )
 
-    print_main_process("Setting up optimizer...")
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=learning_rate)
-
-    student_model, optimizer, train_loader = accelerator.prepare(student_model, optimizer, train_loader)
 
     print_main_process("Starting OPD training...")
     rewards_list = train_opd(
@@ -300,51 +409,66 @@ def main():
         student_tokenizer=student_tokenizer,
         teacher_model=teacher_model,
         teacher_tokenizer=teacher_tokenizer,
-        accelerator=accelerator,
+        device=device,
         train_loader=train_loader,
         optimizer=optimizer,
-        device=device,
+        local_rank=local_rank,
         num_epochs=num_epochs,
         group_size=group_size,
         max_new_tokens=max_new_tokens,
     )
 
-    accelerator.wait_for_everyone()
+    # Ensure all processes finish training
+    torch.distributed.barrier()
     print_main_process("\n" + "="*60)
     print_main_process("Training completed!")
     print_main_process("="*60)
-    if accelerator.is_main_process:
-        unwrapped_student = accelerator.unwrap_model(student_model)
-        ckpt_dir = training_args.output_dir
-        unwrapped_student.save_pretrained(ckpt_dir)
-        student_tokenizer.save_pretrained(ckpt_dir)
-        print_main_process(f"The model has been saved to {ckpt_dir}")
 
-    # Plot training curves
-    import matplotlib.pyplot as plt
-    import numpy as np
-    from scipy.ndimage import uniform_filter1d
-    
-    # Smooth the curves using a moving average
-    def smooth_curve(data, window_size=10):
-        if len(data) < window_size:
-            return data
-        return uniform_filter1d(data, size=window_size, mode='nearest')
-    
-    plt.figure(figsize=(12, 5))
-    # Plot rewards
-    smoothed_rewards = smooth_curve(rewards_list)
-    plt.plot(rewards_list, alpha=0.3, label='Raw')
-    plt.plot(smoothed_rewards, label='Smoothed')
-    plt.xlabel('Training Step')
-    plt.ylabel('Average Reward')
-    plt.title('Average Reward over Time')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig('OPD_training_curves.png')
-    print_main_process(f"Training curves saved to OPD_training_curves.png")
-    plt.show()
+    if local_rank == 0:
+        ckpt_dir = training_args.output_dir
+        # Get full model state dict from FSDP
+        from torch.distributed.fsdp import FullStateDictConfig
+        from torch.distributed.fsdp import StateDictType
+
+        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        # ✅ 1. 所有人共同参与收集权重
+        with FSDP.state_dict_type(student_model, StateDictType.FULL_STATE_DICT, save_policy):
+            full_state_dict = student_model.state_dict()
+        # ✅ 2. 只有 Rank 0 负责落盘保存
+        if local_rank == 0:
+            torch.save(full_state_dict, f"{ckpt_dir}/pytorch_model.bin")
+            student_tokenizer.save_pretrained(ckpt_dir)
+            print_main_process(f"The model has been saved to {ckpt_dir}")
+
+    # Plot training curves (only on main process)
+    if local_rank == 0:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from scipy.ndimage import uniform_filter1d
+
+        # Smooth the curves using a moving average
+        def smooth_curve(data, window_size=10):
+            if len(data) < window_size:
+                return data
+            return uniform_filter1d(data, size=window_size, mode='nearest')
+
+        plt.figure(figsize=(12, 5))
+        # Plot rewards
+        smoothed_rewards = smooth_curve(rewards_list)
+        plt.plot(rewards_list, alpha=0.3, label='Raw')
+        plt.plot(smoothed_rewards, label='Smoothed')
+        plt.xlabel('Training Step')
+        plt.ylabel('Average Reward')
+        plt.title('Average Reward over Time')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig('OPD_training_curves.png')
+        print_main_process(f"Training curves saved to OPD_training_curves.png")
+        plt.show()
+
+    # Cleanup distributed training
+    destroy_process_group()
 
 
 if __name__ == "__main__":
