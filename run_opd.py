@@ -424,21 +424,22 @@ def main():
     print_main_process("Training completed!")
     print_main_process("="*60)
 
+    # Get full model state dict from FSDP
+    from torch.distributed.fsdp import FullStateDictConfig
+    from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
+
+    # 所有卡共同参与收集权重
+    options = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
+    full_state_dict = get_model_state_dict(student_model, options=options)
+    # 只在 Rank 0 负责落盘保存
     if local_rank == 0:
         ckpt_dir = training_args.output_dir
-        # Get full model state dict from FSDP
-        from torch.distributed.fsdp import FullStateDictConfig
-        from torch.distributed.fsdp import StateDictType
-
-        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        # ✅ 1. 所有人共同参与收集权重
-        with FSDP.state_dict_type(student_model, StateDictType.FULL_STATE_DICT, save_policy):
-            full_state_dict = student_model.state_dict()
-        # ✅ 2. 只有 Rank 0 负责落盘保存
-        if local_rank == 0:
-            torch.save(full_state_dict, f"{ckpt_dir}/pytorch_model.bin")
-            student_tokenizer.save_pretrained(ckpt_dir)
-            print_main_process(f"The model has been saved to {ckpt_dir}")
+        torch.save(full_state_dict, f"{ckpt_dir}/pytorch_model.bin")
+        student_tokenizer.save_pretrained(ckpt_dir)
+        print_main_process(f"The model has been saved to {ckpt_dir}")
 
     # Plot training curves (only on main process)
     if local_rank == 0:
