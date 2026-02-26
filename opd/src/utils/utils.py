@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import re
 
 def compute_logprobs_from_model(model, input_ids, attention_mask):
     """
@@ -97,3 +98,55 @@ def generate_completions(model, tokenizer, input_ids, attention_mask,
         "prompt_length": input_ids.shape[1],
     }
 
+def get_parameter_names(model, forbidden_layer_types, forbidden_layer_names=None):
+    """
+    Returns the names of the model parameters that are not inside a forbidden layer.
+    """
+    forbidden_layer_patterns = (
+        [re.compile(pattern) for pattern in forbidden_layer_names] if forbidden_layer_names is not None else []
+    )
+    result = []
+    for name, child in model.named_children():
+        child_params = get_parameter_names(child, forbidden_layer_types, forbidden_layer_names)
+        result += [
+            f"{name}.{n}"
+            for n in child_params
+            if not isinstance(child, tuple(forbidden_layer_types))
+            and not any(pattern.search(f"{name}.{n}".lower()) for pattern in forbidden_layer_patterns)
+        ]
+    # Add model specific parameters that are not in any child
+    result += [
+        k for k in model._parameters if not any(pattern.search(k.lower()) for pattern in forbidden_layer_patterns)
+    ]
+
+    return result
+
+def get_decay_parameter_names(model: nn.Module) -> list[str]:
+    """
+    Get all parameter names that weight decay will be applied to.
+
+    This function filters out parameters in two ways:
+    1. By layer type (instances of layers specified in ALL_LAYERNORM_LAYERS)
+    2. By parameter name patterns (containing 'bias', or variation of 'norm')
+    """
+    forbidden_name_patterns = [r"bias", r"layernorm", r"rmsnorm", r"(?:^|\.)norm(?:$|\.)", r"_norm(?:$|\.)"]
+    decay_parameters = get_parameter_names(model, [nn.LayerNorm], forbidden_name_patterns)
+    return decay_parameters
+
+def get_optimizer_grouped_parameters(model: nn.Module, weight_decay):
+    decay_parameters = get_decay_parameter_names(model)
+    optimizer_grouped_parameters = [
+        {
+            "params": [
+                p for n, p in model.named_parameters() if (n in decay_parameters and p.requires_grad)
+            ],
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": [
+                p for n, p in model.named_parameters() if (n not in decay_parameters and p.requires_grad)
+            ],
+            "weight_decay": 0.0,
+        },
+    ]
+    return optimizer_grouped_parameters

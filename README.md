@@ -83,7 +83,7 @@ You need access to two models:
 ### Option 1: Original Implementation
 
 ```bash
-STUDENT_PATH="Qwen/Qwen3-8B-Base" TEACHER_PATH="Qwen/Qwen3-8B" DATA_PATH="gsm8k" N_GPUS=4 bash scripts/run_opd.sh
+NUM_GPUS=4 bash scripts/run_opd.sh <args>
 ```
 
 ### Option 2: Hugging Face Trainer API Implementation (Recommended)

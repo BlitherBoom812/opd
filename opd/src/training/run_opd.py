@@ -5,6 +5,7 @@ import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser
 from tqdm import tqdm
@@ -26,7 +27,7 @@ from torch.distributed.fsdp.wrap import (
 )
 from opd.src.utils.params import DataArguments, ModelArguments, TrainingArguments
 from opd.src.data.dataset import get_dataset
-from opd.src.utils import generate_completions, compute_logprobs_from_model
+from opd.src.utils import generate_completions, compute_logprobs_from_model, get_optimizer_grouped_parameters
 
 torch.manual_seed(42)
 # ============================================================================
@@ -319,26 +320,42 @@ def setup_fsdp_model(model, local_rank):
     )
     return fsdp_model
 
+def setup_distributed():
+    # 1. 获取 local_rank
+    # 使用 .get() 是为了防止偶尔在单卡/非 torchrun 环境下调试时报 KeyError
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    global_rank = int(os.environ.get('RANK', 0))
+    
+    # 2. 先设置当前进程的可见设备（必须在 init_process_group 之前！）
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f'cuda:{local_rank}')
+    
+    # 3. 初始化分布式进程组
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend='nccl',
+            device_id=device
+        )
+        
+    return device, local_rank, global_rank
+
 @record
 def main():
     global local_rank
     # Initialize distributed training
-    init_process_group(backend='nccl')
-    local_rank = int(os.environ['LOCAL_RANK'])
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f'cuda:{local_rank}')
+    device, local_rank, global_rank = setup_distributed()
 
     print(f"local rank: {repr(local_rank)}, {type(local_rank)}")
 
     # Configuration
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    batch_size = 2  # Small batch size for homework
-    group_size = 8  # Number of samples per prompt
-    num_epochs = 5
-    learning_rate = 5e-6
-    max_new_tokens = 128
+    training_args: TrainingArguments
+    # batch_size = 2  # Small batch size for homework
+    # group_size = 8  # Number of samples per prompt
+    # num_epochs = 5
+    # learning_rate = 5e-6
+    # max_new_tokens = 128
 
     world_size = int(os.environ['WORLD_SIZE'])
     print_main_process(f"Training on {world_size} GPUs")
@@ -347,14 +364,14 @@ def main():
     student_model_path = model_args.student_model_path
     teacher_model_path = model_args.teacher_model_path
     
-    print_main_process("Loading student tokenizer and model...")
+    print_main_process(f"Loading student tokenizer and model from {student_model_path}...")
     student_model, student_tokenizer = load_model_and_tokenizer(student_model_path, cpu_device)
     
-    print_main_process("Loading ref tokenizer and model...")
+    print_main_process(f"Loading ref tokenizer and model from {student_model_path}...")
     ref_model, _ = load_model_and_tokenizer(student_model_path, cpu_device)
     ref_model.requires_grad_(False)
     
-    print_main_process("Loading teacher tokenizer and model...")
+    print_main_process(f"Loading teacher tokenizer and model from {teacher_model_path}...")
     teacher_model, teacher_tokenizer = load_model_and_tokenizer(teacher_model_path, cpu_device)
     teacher_model.requires_grad_(False)
 
@@ -382,7 +399,7 @@ def main():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=training_args.per_device_train_batch_size,
         sampler=train_sampler,
         collate_fn=lambda x: {
             "input_ids": torch.nn.utils.rnn.pad_sequence(
@@ -400,7 +417,13 @@ def main():
         }
     )
 
-    optimizer = torch.optim.AdamW(student_model.parameters(), lr=learning_rate)
+    optimizer_grouped_parameters = get_optimizer_grouped_parameters(student_model, training_args.weight_decay)
+    optimizer = torch.optim.AdamW(
+        optimizer_grouped_parameters, 
+        lr=training_args.learning_rate,
+        betas=(training_args.adam_beta1, training_args.adam_beta2), 
+        eps=training_args.adam_epsilon,
+    )
 
     print_main_process("Starting OPD training...")
     rewards_list = train_opd(
@@ -413,9 +436,9 @@ def main():
         train_loader=train_loader,
         optimizer=optimizer,
         local_rank=local_rank,
-        num_epochs=num_epochs,
-        group_size=group_size,
-        max_new_tokens=max_new_tokens,
+        num_epochs=int(training_args.num_train_epochs), # support integer only now
+        group_size=training_args.group_size,
+        max_new_tokens=training_args.max_new_tokens,
     )
 
     # Ensure all processes finish training
