@@ -80,14 +80,31 @@ You need access to two models:
 
 ## Running Training
 
+### Option 1: Original Implementation
+
 ```bash
 STUDENT_PATH="Qwen/Qwen3-8B-Base" TEACHER_PATH="Qwen/Qwen3-8B" DATA_PATH="gsm8k" N_GPUS=4 bash scripts/run_opd.sh
 ```
 
-Or you can specific more parameters: 
+### Option 2: Hugging Face Trainer API Implementation (Recommended)
 
 ```bash
-# Using a custom local dataset
+STUDENT_PATH="Qwen/Qwen3-8B-Base" TEACHER_PATH="Qwen/Qwen3-8B" DATA_PATH="gsm8k" N_GPUS=4 bash scripts/run_opd_trainer.sh
+```
+
+The Trainer API version provides:
+- Better integration with Hugging Face ecosystem
+- Automatic logging and checkpointing
+- Distributed training optimizations
+- Callback support for custom metrics
+- Easier hyperparameter management
+
+### Advanced Usage
+
+For more control, you can run the training modules directly:
+
+**Original Implementation:**
+```bash
 torchrun --nproc_per_node=4 -m opd.src.training.run_opd \
   --student_model_path "your-model-path" \
   --teacher_model_path "your-teacher-path" \
@@ -97,3 +114,40 @@ torchrun --nproc_per_node=4 -m opd.src.training.run_opd \
   --num_epochs 10 \
   --learning_rate 1e-5
 ```
+
+**Trainer API Implementation:**
+```bash
+torchrun --nproc_per_node=4 -m opd.src.training.run_opd_trainer \
+  --student_model_path "your-model-path" \
+  --teacher_model_path "your-teacher-path" \
+  --dataset_name "gsm8k" \
+  --output_dir "./checkpoints/custom_model" \
+  --num_train_epochs 10 \
+  --learning_rate 1e-5 \
+  --group_size 8 \
+  --kl_weight 0.1
+```
+
+## Trainer API Specific Parameters
+
+The `run_opd_trainer.py` version supports additional parameters through the TrainingArguments API:
+
+### Core OPD Parameters
+- `--group_size`: Number of samples per prompt (default: 8)
+- `--max_new_tokens`: Maximum tokens to generate (default: 128)
+- `--kl_weight`: KL regularization weight (default: 0.1)
+
+### Standard Training Parameters
+- `--num_train_epochs`: Number of training epochs (default: 5)
+- `--per_device_train_batch_size`: Batch size per GPU (default: 2)
+- `--learning_rate`: Learning rate (default: 5e-6)
+- `--weight_decay`: Weight decay (default: 0.0)
+- `--warmup_ratio`: Warmup ratio (default: 0.03)
+- `--logging_steps`: Logging frequency (default: 1)
+- `--save_steps`: Checkpoint save frequency (default: 500)
+- `--save_total_limit`: Number of checkpoints to keep (default: 2)
+
+### Performance Parameters
+- `--bf16`: Use bfloat16 precision (default: true)
+- `--dataloader_num_workers`: Number of data loading workers (default: 4)
+- `--ddp_find_unused_parameters`: DDP parameter handling (default: false)

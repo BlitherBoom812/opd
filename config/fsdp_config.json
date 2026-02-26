@@ -1,0 +1,7 @@
+{
+  "transformer_layer_cls_to_wrap": [
+    "Qwen3DecoderLayer"
+  ],
+  "fsdp_offload_params": false,
+  "fsdp_state_dict_type": "FULL_STATE_DICT"
+}

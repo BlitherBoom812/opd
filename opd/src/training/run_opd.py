@@ -200,6 +200,7 @@ def train_opd(
             print_main_process(f"student logprobs: {student_logprobs.shape}, {student_logprobs}")
             with torch.no_grad():
                 ref_logprobs = compute_logprobs_from_model(ref_model, seq_ids, seq_mask)
+                print_main_process(f"ref logprobs: {ref_logprobs.shape}, {ref_logprobs}")
                 teacher_logprobs = compute_logprobs_from_model(teacher_model, seq_ids, seq_mask)
                 print_main_process(f"teacher logprobs: {teacher_logprobs.shape}, {teacher_logprobs}")
             
