@@ -1,31 +1,20 @@
 #!/bin/bash
 
 # OPD Training using Hugging Face Trainer API
-# Usage: STUDENT_PATH="path/to/student" TEACHER_PATH="path/to/teacher" DATA_PATH="dataset_name" N_GPUS=4 bash scripts/run_opd_trainer.sh
+# Usage: NUM_GPUS=4 bash scripts/run_opd_trainer.sh <args>
 export OMP_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
 # Set default values if not provided
-export STUDENT_PATH="${STUDENT_PATH:-Qwen/Qwen3-8B-Base}"
-export TEACHER_PATH="${TEACHER_PATH:-Qwen/Qwen3-8B}"
-export DATASET_NAME="${DATASET_NAME:-gsm8k}"
-export N_GPUS="${N_GPUS:-4}"
-export OUTPUT_DIR="${OUTPUT_DIR:-./checkpoints/opd_trainer_model}"
-
-echo "Starting OPD training with Trainer API..."
-echo "Student Model: $STUDENT_PATH"
-echo "Teacher Model: $TEACHER_PATH"
-echo "Dataset: $DATASET_NAME"
-echo "Number of GPUs: $N_GPUS"
-echo "Output Directory: $OUTPUT_DIR"
+export NUM_GPUS="${NUM_GPUS:-4}"
 
 # Run training using torchrun
-torchrun --nproc_per_node=$N_GPUS \
+torchrun --nproc_per_node=$NUM_GPUS \
     -m opd.src.training.run_opd_trainer \
-    --student_model_path $STUDENT_PATH \
-    --teacher_model_path $TEACHER_PATH \
-    --dataset_name $DATASET_NAME \
-    --output_dir $OUTPUT_DIR \
-    --num_train_epochs 5 \
+    --student_model_path Qwen/Qwen3-8B-Base \
+    --teacher_model_path Qwen/Qwen3-8B \
+    --dataset_name gsm8k \
+    --output_dir ./checkpoints/opd_trainer_model \
+    --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --learning_rate 5e-6 \
     --weight_decay 0.0 \

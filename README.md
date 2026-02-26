@@ -10,8 +10,8 @@ OPD is a distillation approach that trains a student model to improve upon a tea
 
 ## Prerequisites
 
-- Python 3.10+
-- PyTorch 2.10.0+
+- Python 3.10.12
+- PyTorch 2.10.0
 - Multiple GPUs (recommended for distributed training)
 - CUDA-compatible GPUs
 
@@ -43,11 +43,6 @@ The code supports two main datasets:
 # Create a data directory
 mkdir -p ./data/gsm8k
 
-# The dataset loader expects the dataset in Hugging Face format
-# If you have a local copy, ensure it follows the standard format with:
-# - "question" field: The math problem
-# - "answer" field: The solution (with #### prefix for final answer)
-```
 
 2. Dataset format:
 ```
@@ -89,65 +84,5 @@ NUM_GPUS=4 bash scripts/run_opd.sh <args>
 ### Option 2: Hugging Face Trainer API Implementation (Recommended)
 
 ```bash
-STUDENT_PATH="Qwen/Qwen3-8B-Base" TEACHER_PATH="Qwen/Qwen3-8B" DATA_PATH="gsm8k" N_GPUS=4 bash scripts/run_opd_trainer.sh
+NUM_GPUS=4 bash scripts/run_opd_trainer.sh <args>
 ```
-
-The Trainer API version provides:
-- Better integration with Hugging Face ecosystem
-- Automatic logging and checkpointing
-- Distributed training optimizations
-- Callback support for custom metrics
-- Easier hyperparameter management
-
-### Advanced Usage
-
-For more control, you can run the training modules directly:
-
-**Original Implementation:**
-```bash
-torchrun --nproc_per_node=4 -m opd.src.training.run_opd \
-  --student_model_path "your-model-path" \
-  --teacher_model_path "your-teacher-path" \
-  --dataset_name "gsm8k" \
-  --data_path "./path/to/your/dataset" \
-  --output_dir "./checkpoints/custom_model" \
-  --num_epochs 10 \
-  --learning_rate 1e-5
-```
-
-**Trainer API Implementation:**
-```bash
-torchrun --nproc_per_node=4 -m opd.src.training.run_opd_trainer \
-  --student_model_path "your-model-path" \
-  --teacher_model_path "your-teacher-path" \
-  --dataset_name "gsm8k" \
-  --output_dir "./checkpoints/custom_model" \
-  --num_train_epochs 10 \
-  --learning_rate 1e-5 \
-  --group_size 8 \
-  --kl_weight 0.1
-```
-
-## Trainer API Specific Parameters
-
-The `run_opd_trainer.py` version supports additional parameters through the TrainingArguments API:
-
-### Core OPD Parameters
-- `--group_size`: Number of samples per prompt (default: 8)
-- `--max_new_tokens`: Maximum tokens to generate (default: 128)
-- `--kl_weight`: KL regularization weight (default: 0.1)
-
-### Standard Training Parameters
-- `--num_train_epochs`: Number of training epochs (default: 5)
-- `--per_device_train_batch_size`: Batch size per GPU (default: 2)
-- `--learning_rate`: Learning rate (default: 5e-6)
-- `--weight_decay`: Weight decay (default: 0.0)
-- `--warmup_ratio`: Warmup ratio (default: 0.03)
-- `--logging_steps`: Logging frequency (default: 1)
-- `--save_steps`: Checkpoint save frequency (default: 500)
-- `--save_total_limit`: Number of checkpoints to keep (default: 2)
-
-### Performance Parameters
-- `--bf16`: Use bfloat16 precision (default: true)
-- `--dataloader_num_workers`: Number of data loading workers (default: 4)
-- `--ddp_find_unused_parameters`: DDP parameter handling (default: false)

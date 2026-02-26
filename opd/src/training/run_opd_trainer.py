@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed import destroy_process_group
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -298,7 +299,7 @@ class OPDCallback(TrainerCallback):
 
         # Log additional OPD metrics if available
         if "total_loss" in logs:
-            logs["opd_total_loss"] = logs["policy_loss"]
+            logs["opd_total_loss"] = logs["total_loss"]
 
 # ============================================================================
 # Model Loading and Setup
@@ -334,8 +335,8 @@ def main():
     # Parse arguments
     parser = HfArgumentParser((ModelArguments, DataArguments, OPDTrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    group_size = 8  # Number of samples per prompt
-    max_new_tokens = 128
+    # group_size = 8  # Number of samples per prompt
+    # max_new_tokens = 128
 
     global local_rank
     local_rank = dist.get_rank() if dist.is_initialized() else 0
@@ -348,20 +349,22 @@ def main():
 
     # Load models and tokenizers
     initial_device = None
+    student_model_path = model_args.student_model_path
+    teacher_model_path = model_args.teacher_model_path
 
-    print_main_process("Loading student model and tokenizer...")
+    print_main_process(f"Loading student tokenizer and model from {student_model_path}...")
     student_model, student_tokenizer = load_model_and_tokenizer(
-        model_args.student_model_path, initial_device
+        student_model_path, initial_device
     )
 
-    print_main_process("Loading reference model...")
+    print_main_process(f"Loading ref tokenizer and model from {student_model_path}...")
     ref_model, _ = load_model_and_tokenizer(
-        model_args.student_model_path, initial_device
+        student_model_path, initial_device
     )
 
-    print_main_process("Loading teacher model...")
+    print_main_process(f"Loading teacher tokenizer and model from {teacher_model_path}...")
     teacher_model, teacher_tokenizer = load_model_and_tokenizer(
-        model_args.teacher_model_path, initial_device
+        teacher_model_path, initial_device
     )
 
     # Load dataset
@@ -390,8 +393,8 @@ def main():
         teacher_tokenizer=teacher_tokenizer,
         local_rank=local_rank,
         num_epochs=training_args.num_train_epochs,
-        group_size=group_size,
-        max_new_tokens=max_new_tokens,
+        group_size=training_args.group_size,
+        max_new_tokens=training_args.max_new_tokens,
         model=student_model,
         args=training_args,
         data_collator=data_collator,
@@ -408,9 +411,10 @@ def main():
 
     # Save model
     print_main_process("Training completed!")
-    if local_rank == 0:
-        trainer.save_model()
-        trainer.save_metrics("train", train_result.metrics)
+    trainer.save_model()
+    trainer.save_metrics("train", train_result.metrics)
+
+    destroy_process_group()
 
 if __name__ == "__main__":
     main()
