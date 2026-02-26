@@ -36,13 +36,8 @@ The code supports two main datasets:
 
 1. Download the GSM8K dataset:
 ```bash
-# Option 1: Using Hugging Face datasets (automatically downloaded)
-# The dataset will be downloaded automatically when you run the training
-
-# Option 2: Manual download and local storage
-# Create a data directory
 mkdir -p ./data/gsm8k
-
+```
 
 2. Dataset format:
 ```
