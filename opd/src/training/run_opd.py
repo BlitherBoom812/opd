@@ -22,12 +22,11 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import (
     size_based_auto_wrap_policy,
     transformer_auto_wrap_policy,
-    # 推荐使用新的 ModuleWrapPolicy (PyTorch 2.1+ 更推荐)
     ModuleWrapPolicy, 
 )
-from params import DataArguments, ModelArguments, TrainingArguments
-from data import OpenThoughtsDataset, get_dataset
-from utils import generate_completions, compute_logprobs_from_model
+from opd.src.utils.params import DataArguments, ModelArguments, TrainingArguments
+from opd.src.data.dataset import get_dataset
+from opd.src.utils import generate_completions, compute_logprobs_from_model
 
 torch.manual_seed(42)
 # ============================================================================
@@ -464,7 +463,7 @@ def main():
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig('OPD_training_curves.png')
+        # plt.savefig('OPD_training_curves.png')
         print_main_process(f"Training curves saved to OPD_training_curves.png")
         plt.show()
 
