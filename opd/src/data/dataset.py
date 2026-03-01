@@ -55,7 +55,7 @@ class OpenThoughtsDataset(Dataset):
         tokenized_full = self.tokenizer(
             full_text,
             max_length=self.max_length,
-            padding="max_length",
+            # padding="max_length", # 在 collate_fn 里做动态填充是更加推荐的做法
             truncation=True,
             return_tensors="pt"
         )
@@ -172,6 +172,6 @@ def get_dataset(dataset_name, *args, **kwargs) -> Dataset:
 if __name__ == "__main__":
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained('/mnt/nvme0/tsz/modelscope_cache/models/Qwen/Qwen3-0.6B')
-    dataset = get_dataset('open-thoughts', data_path="data/openthoughts_math_w_answer", split='train', tokenizer=tokenizer, load_from_disk=True)
+    dataset = get_dataset('open-thoughts', data_path="data/openthoughts_math_w_answer", split='train', tokenizer=tokenizer, load_from_disk=True, max_length=32768)
     print(dataset)
     breakpoint()

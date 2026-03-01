@@ -57,9 +57,12 @@ class TrainingArguments(HfTrainingArguments):
 @dataclass
 class DataArguments:
     dataset_name: str = field(
-        default=None, metadata={"help": "dataset_name of training data."}
+        default=None, metadata={"help": "Dataset Name of training data."}
     )
     data_path: str = field(
         default=None, metadata={"help": "Path to the training data."}
+    )
+    split: str = field(
+        default='train', metadata={"help": "Training data splits."}
     )
     lazy_preprocess: bool = False
